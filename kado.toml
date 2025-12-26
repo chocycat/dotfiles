@@ -1,0 +1,11 @@
+refresh_rate = 120
+
+['DisplayPort-0'.top]
+delay = 50
+size = 1
+on_enter = 'echo "show-bar/1" | socat - UNIX-CONNECT:/tmp/polestar.sock'
+
+['DisplayPort-1'.top]
+delay = 50
+size = 1
+on_enter = 'echo "show-bar/0" | socat - UNIX-CONNECT:/tmp/polestar.sock'
