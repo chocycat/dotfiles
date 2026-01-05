@@ -27,20 +27,50 @@ fopts:set_subpixel_order(cairo.SubpixelOrder.DEFAULT)
 
 local bar = nil
 local menus = {}
+local tools = {}
 local extents = {}
-local clock = ""
+local tool_extents = {}
 local pool = {}
 local stack = {}
 local timer = nil
+local active_tool = nil
+local image_cache = {}
 
-local function tick()
-  clock = tostring(os.date("%I:%M %p"))
-  if clock:sub(1, 1) == "0" then
-    clock = clock:sub(2)
+local function load_image(path, invert)
+  if not path then return nil end
+
+  local full_path = path
+  if not path:match("^/") then
+    full_path = gears.filesystem.get_configuration_dir() .. path
   end
-  if bar then
-    bar.widget:emit_signal("widget::redraw_needed")
+
+  local key = full_path .. (invert and ":inv" or "")
+  if image_cache[key] then
+    return image_cache[key]
   end
+
+  local ok, s = pcall(cairo.ImageSurface.create_from_png, full_path)
+  if not ok or not s then
+    return nil
+  end
+
+  if invert then
+    local w = s:get_width()
+    local h = s:get_height()
+    local inv = cairo.ImageSurface.create(cairo.Format.ARGB32, w, h)
+    local cr = cairo.Context.create(inv)
+
+    cr:set_source_surface(s, 0, 0)
+    cr:paint()
+    cr:set_operator(cairo.Operator.DIFFERENCE)
+    cr:set_source_rgb(1, 1, 1)
+    cr:mask_surface(s, 0, 0)
+
+    s = inv
+  end
+
+  image_cache[key] = s
+  return s
 end
 
 local function measure(text)
@@ -59,25 +89,52 @@ local function measure(text)
 end
 
 local function has_toggles(items)
+  local has = false
+  local max_width = 0
+
   for _, v in ipairs(items) do
     if v.checked ~= nil or v.radio ~= nil then
-      return true
+      has = true
+    elseif v.images then
+      has = true
+      for _, img in ipairs(v.images) do
+        if type(img) == "string" then
+          local surface = load_image(img, false)
+          if surface then
+            max_width = math.max(max_width, surface:get_width())
+          end
+        elseif type(img) == "table" then
+          if #img > 0 then
+            max_width = math.max(max_width, #img[1] * dpi(1))
+          end
+        end
+      end
     end
   end
-  return false
+
+  return has, max_width
 end
 
 local function dd_size(items)
   local max_w = cfg.dropdown.min_width
   local arrow_w = #pattern.menu.submenu_arrow[1] + dpi(8)
-  local toggles = has_toggles(items)
-  local tog_sp = toggles and cfg.dropdown.indicator_width or 0
+  local toggles, img_width = has_toggles(items)
+
+  local tog_sp = 0
+  if toggles then
+    if img_width > 0 then
+      tog_sp = img_width + dpi(8)
+    else
+      tog_sp = cfg.dropdown.indicator_width
+    end
+  end
 
   for _, v in ipairs(items) do
     if not v.separator then
       local tw = measure(v.text or "")
+      local rw = v.text_right and (measure(v.text_right) + dpi(16)) or 0
       local extra = v.submenu and arrow_w or 0
-      max_w = math.max(max_w, tw + cfg.dropdown.padding_x * 2 + extra + tog_sp)
+      max_w = math.max(max_w, tw + rw + cfg.dropdown.padding_x * 2 + extra + tog_sp)
     end
   end
 
@@ -90,16 +147,15 @@ local function dd_size(items)
     end
   end
 
-  return max_w, h, toggles
+  return max_w, h, toggles, tog_sp
 end
 
-local function draw_item(cr, pango, item, y, w, hovered, toggles)
+local function draw_item(cr, pango, item, y, w, hovered, tog_sp)
   local disabled = item.enabled == false
-  local tog_sp = toggles and cfg.dropdown.indicator_width or 0
   local tx = cfg.dropdown.padding_x + tog_sp
   local g = cfg.dropdown.disabled_color
 
-  if hovered then
+  if hovered and not item.nonselectable then
     cr:set_source_rgb(0, 0, 0)
     cr:rectangle(dpi(1), y, w - dpi(2), cfg.dropdown.item_height)
     cr:fill()
@@ -110,7 +166,32 @@ local function draw_item(cr, pango, item, y, w, hovered, toggles)
     cr:set_source_rgb(0, 0, 0)
   end
 
-  if item.checked == true then
+  if item.images then
+    local inverted = hovered and not item.nonselectable
+    local ix = cfg.dropdown.padding_x
+
+    for _, img in ipairs(item.images) do
+      if type(img) == "string" then
+        local surface = load_image(img, inverted)
+        if surface then
+          local img_h = surface:get_height()
+          local iy = y + math.floor((cfg.dropdown.item_height - img_h) / 2)
+          cr:save()
+          cr:set_source_surface(surface, ix, iy)
+          cr:paint()
+          cr:restore()
+        end
+      elseif type(img) == "table" then
+        if inverted then
+          cr:set_source_rgb(1, 1, 1)
+        else
+          cr:set_source_rgb(0, 0, 0)
+        end
+        local pat_iy = y + math.floor((cfg.dropdown.item_height - (#img * dpi(1))) / 2)
+        pattern.draw(cr, img, ix, pat_iy, dpi(1))
+      end
+    end
+  elseif item.checked == true then
     local l = Pango.Layout.new(pango)
     l:set_font_description(Pango.FontDescription.from_string(cfg.font))
     l:set_text("✓", -1)
@@ -127,6 +208,15 @@ local function draw_item(cr, pango, item, y, w, hovered, toggles)
   l:set_text(item.text or "", -1)
   cr:move_to(tx, y + dpi(2))
   PangoCairo.show_layout(cr, l)
+
+  if item.text_right then
+    local lr = Pango.Layout.new(pango)
+    lr:set_font_description(Pango.FontDescription.from_string(cfg.font))
+    lr:set_text(item.text_right, -1)
+    local rw = lr:get_pixel_size()
+    cr:move_to(w - rw - cfg.dropdown.padding_x, y + dpi(2))
+    PangoCairo.show_layout(cr, lr)
+  end
 
   if item.submenu then
     local arrow = pattern.menu.submenu_arrow
@@ -232,7 +322,7 @@ local function open_sub(level, items, x, y, parent_idx)
   close_from(level)
 
   local dd = get_dd(level)
-  local w, h, toggles = dd_size(items)
+  local w, h, toggles, tog_sp = dd_size(items)
 
   local geo = screen.primary.geometry
   if x + w > geo.x + geo.width then
@@ -262,7 +352,7 @@ local function open_sub(level, items, x, y, parent_idx)
     width = w,
     height = h,
     parent_idx = parent_idx,
-    has_toggles = toggles,
+    has_toggles = tog_sp,
   }
 
   dd.visible = true
@@ -276,6 +366,7 @@ local function close_all()
   end
   close_from(1)
   stack = {}
+  active_tool = nil
   redraw()
 end
 
@@ -298,7 +389,7 @@ local function hovered_at(level, mx, my)
     end
 
     if ly >= y and ly < y + ih then
-      if not v.separator ~= false then
+      if not v.separator then
         return i
       else
         return nil
@@ -347,11 +438,11 @@ local function make_bar()
     local x = cfg.padding_x
     extents = {}
 
-    local active = nil
-    if stack[1] then
+    local active_menu = nil
+    if stack[1] and not active_tool then
       for _, m in ipairs(menus) do
         if m.items == stack[1].items then
-          active = m
+          active_menu = m
           break
         end
       end
@@ -371,7 +462,7 @@ local function make_bar()
         menu = m,
       }
 
-      if active == m then
+      if active_menu == m then
         cr:set_source_rgb(0, 0, 0)
         cr:rectangle(x - cfg.menu_padding, 0, tw + cfg.menu_padding * 2, h - dpi(1))
         cr:fill()
@@ -385,14 +476,50 @@ local function make_bar()
       x = x + tw + cfg.item_gap
     end
 
-    local cl = Pango.Layout.new(p)
-    cl:set_font_description(Pango.FontDescription.from_string(cfg.font))
-    cl:set_text(clock, -1)
+    tool_extents = {}
+    local rx = w - cfg.padding_x
 
-    local cw = cl:get_pixel_size()
-    cr:set_source_rgb(0, 0, 0)
-    cr:move_to(w - cw - cfg.padding_x, dpi(2))
-    PangoCairo.show_layout(cr, cl)
+    for i = #tools, 1, -1 do
+      local t = tools[i]
+      if t.draw then
+        local is_active = active_tool == t
+
+        cr:save()
+
+        local measure_s = cairo.ImageSurface.create(cairo.Format.ARGB32, 1000, h)
+        local measure_cr = cairo.Context.create(measure_s)
+        measure_cr:set_font_options(fopts)
+        local measure_pango = PangoCairo.create_context(measure_cr)
+        PangoCairo.context_set_font_options(measure_pango, fopts)
+        local tw = t.draw(measure_cr, h, is_active, measure_pango) or 0
+        measure_s:finish()
+
+        local tx = rx - tw
+
+        tool_extents[i] = {
+          x = tx - cfg.item_gap / 2,
+          width = tw + cfg.item_gap,
+          highlight_x = tx - cfg.menu_padding,
+          tool = t,
+          real_x = tx,
+          real_width = tw,
+        }
+
+        if is_active then
+          cr:set_source_rgb(0, 0, 0)
+          cr:rectangle(tx - cfg.menu_padding, 0, tw + cfg.menu_padding * 2, h - dpi(1))
+          cr:fill()
+        end
+
+        cr:translate(tx, 0)
+        local tool_pango = PangoCairo.create_context(cr)
+        PangoCairo.context_set_font_options(tool_pango, fopts)
+        t.draw(cr, h, is_active, tool_pango)
+
+        cr:restore()
+        rx = tx - cfg.item_gap
+      end
+    end
   end
 
   return widget
@@ -407,7 +534,16 @@ local function menu_at(x)
   return nil, nil
 end
 
-local function interact(menu, hx)
+local function tool_at(x)
+  for _, e in pairs(tool_extents) do
+    if x >= e.x and x < e.x + e.width then
+      return e.tool, e.highlight_x
+    end
+  end
+  return nil, nil
+end
+
+local function interact_menu(menu, hx)
   if not menu.items then return end
 
   local geo = bar:geometry()
@@ -418,6 +554,7 @@ local function interact(menu, hx)
 
     if m.y >= bg.y and m.y < bg.y + cfg.height then
       local hm, hhx = menu_at(m.x - bg.x)
+      local ht, htx = tool_at(m.x - bg.x)
 
       if hm and hm.items then
         local cur = stack[1] and stack[1].items
@@ -427,7 +564,19 @@ local function interact(menu, hx)
             timer = nil
           end
           close_from(1)
+          active_tool = nil
           open_sub(1, hm.items, bg.x + hhx, bg.y + cfg.height, nil)
+        end
+      elseif ht and ht.items then
+        local cur = stack[1] and stack[1].items
+        if ht.items ~= cur then
+          if timer then
+            timer:stop()
+            timer = nil
+          end
+          close_from(1)
+          active_tool = ht
+          open_sub(1, ht.items, bg.x + htx, bg.y + cfg.height, nil)
         end
       end
 
@@ -451,7 +600,12 @@ local function interact(menu, hx)
         local v = e.items[fi]
 
         local old = e.hovered
-        e.hovered = fi
+
+        if v.nonselectable then
+          e.hovered = nil
+        else
+          e.hovered = fi
+        end
 
         for lv = fl + 1, #stack do
           if stack[lv] then
@@ -468,7 +622,7 @@ local function interact(menu, hx)
           end
         end
 
-        if v.submenu then
+        if v.submenu and not v.nonselectable then
           local open = stack[fl + 1] and stack[fl + 1].parent_idx == fi
           if not open and old ~= fi then
             sched_sub(fl, v, fi, e)
@@ -504,7 +658,153 @@ local function interact(menu, hx)
         local e = stack[lv]
         if e and e.hovered then
           local v = e.items[e.hovered]
-          if v and not v.submenu then
+          if v and not v.submenu and not v.nonselectable then
+            sel = v
+            break
+          end
+        end
+      end
+
+      if timer then
+        timer:stop()
+        timer = nil
+      end
+
+      close_all()
+
+      if sel and sel.on_click then
+        sel.on_click()
+      end
+
+      return false
+    end
+
+    return true
+  end, "left_ptr")
+end
+
+local function interact_tool(tool, hx)
+  if not tool.items then
+    if tool.on_click then
+      tool.on_click()
+    end
+    return
+  end
+
+  local geo = bar:geometry()
+  active_tool = tool
+  open_sub(1, tool.items, geo.x + hx, geo.y + cfg.height, nil)
+
+  mousegrabber.run(function(m)
+    local bg = bar:geometry()
+
+    if m.y >= bg.y and m.y < bg.y + cfg.height then
+      local hm, hhx = menu_at(m.x - bg.x)
+      local ht, htx = tool_at(m.x - bg.x)
+
+      if hm and hm.items then
+        local cur = stack[1] and stack[1].items
+        if hm.items ~= cur then
+          if timer then
+            timer:stop()
+            timer = nil
+          end
+          close_from(1)
+          active_tool = nil
+          open_sub(1, hm.items, bg.x + hhx, bg.y + cfg.height, nil)
+        end
+      elseif ht and ht.items then
+        local cur = stack[1] and stack[1].items
+        if ht.items ~= cur then
+          if timer then
+            timer:stop()
+            timer = nil
+          end
+          close_from(1)
+          active_tool = ht
+          open_sub(1, ht.items, bg.x + htx, bg.y + cfg.height, nil)
+        end
+      end
+
+      for _, e in pairs(stack) do
+        if e then e.hovered = nil end
+      end
+      redraw()
+    else
+      local fl, fi = nil, nil
+
+      for lv = #stack, 1, -1 do
+        local idx = hovered_at(lv, m.x, m.y)
+        if idx then
+          fl, fi = lv, idx
+          break
+        end
+      end
+
+      if fl then
+        local e = stack[fl]
+        local v = e.items[fi]
+
+        local old = e.hovered
+
+        if v.nonselectable then
+          e.hovered = nil
+        else
+          e.hovered = fi
+        end
+
+        for lv = fl + 1, #stack do
+          if stack[lv] then
+            stack[lv].hovered = nil
+          end
+        end
+
+        for lv = 1, fl - 1 do
+          if stack[lv] then
+            local dom = stack[lv + 1] and stack[lv + 1].parent_idx == stack[lv].hovered
+            if not dom then
+              stack[lv].hovered = nil
+            end
+          end
+        end
+
+        if v.submenu and not v.nonselectable then
+          local open = stack[fl + 1] and stack[fl + 1].parent_idx == fi
+          if not open and old ~= fi then
+            sched_sub(fl, v, fi, e)
+          end
+        else
+          if timer then
+            timer:stop()
+            timer = nil
+          end
+          close_from(fl + 1)
+        end
+
+        redraw()
+      else
+        local changed = false
+        for lv = 1, #stack do
+          local e = stack[lv]
+          if e and e.hovered then
+            local child = stack[lv + 1] and stack[lv + 1].parent_idx == e.hovered
+            if not child then
+              e.hovered = nil
+              changed = true
+            end
+          end
+        end
+        if changed then redraw() end
+      end
+    end
+
+    if not m.buttons[1] then
+      local sel = nil
+      for lv = #stack, 1, -1 do
+        local e = stack[lv]
+        if e and e.hovered then
+          local v = e.items[e.hovered]
+          if v and not v.submenu and not v.nonselectable then
             sel = v
             break
           end
@@ -536,6 +836,56 @@ function topbar.set_menus(m)
   end
 end
 
+function topbar.set_tools(t)
+  tools = t
+  if bar then
+    bar.widget:emit_signal("widget::redraw_needed")
+  end
+end
+
+function topbar.clock_tool()
+  local clock_text = ""
+
+  local function tick()
+    clock_text = tostring(os.date("%I:%M %p"))
+    if clock_text:sub(1, 1) == "0" then
+      clock_text = clock_text:sub(2)
+    end
+    if bar then
+      bar.widget:emit_signal("widget::redraw_needed")
+    end
+  end
+
+  tick()
+  gears.timer({
+    timeout = 1,
+    autostart = true,
+    call_now = true,
+    callback = tick
+  })
+
+  return {
+    draw = function(cr, _, is_active, pango)
+      local l = Pango.Layout.new(pango)
+      l:set_font_description(Pango.FontDescription.from_string(cfg.font))
+      l:set_text(clock_text, -1)
+
+      local tw = l:get_pixel_size()
+
+      if is_active then
+        cr:set_source_rgb(1, 1, 1)
+      else
+        cr:set_source_rgb(0, 0, 0)
+      end
+
+      cr:move_to(0, dpi(2))
+      PangoCairo.show_layout(cr, l)
+
+      return tw
+    end,
+  }
+end
+
 function topbar.init(args)
   args = args or {}
   local s = args.screen or screen.primary
@@ -558,23 +908,27 @@ function topbar.init(args)
   bar:connect_signal("button::press", function(_, lx, _, button)
     if button == 1 then
       local m, hx = menu_at(lx)
+      local t, tx = tool_at(lx)
+
       if m and m.items then
-        interact(m, hx)
+        interact_menu(m, hx)
       elseif m and m.on_click then
         m.on_click()
+      elseif t then
+        interact_tool(t, tx)
       end
     end
   end)
 
-  tick()
-  gears.timer({
-    timeout = 1,
-    autostart = true,
-    call_now = true,
-    callback = tick
-  })
-
   return bar
+end
+
+topbar.load_image = load_image
+
+function topbar.redraw()
+  if bar then
+    bar.widget:emit_signal("widget::redraw_needed")
+  end
 end
 
 return topbar

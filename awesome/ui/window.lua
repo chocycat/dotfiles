@@ -10,6 +10,12 @@ function window.init()
   client.connect_signal("manage", function(c)
     apply_styles(c)
   end)
+
+  client.connect_signal("property::maximized", function(c)
+    if not c.maximized then
+      apply_styles(c)
+    end
+  end)
 end
 
 return window

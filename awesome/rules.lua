@@ -4,32 +4,9 @@ local client_buttons = gears.table.join(
   end)
 )
 
-local cfg = {
-  cascade_offset_x = dpi(10),
-  cascade_offset_y = dpi(10),
-  padding = dpi(10),
-}
-local cascade_index = 0
+local placement = require("ui.placement")
 
-local function cascade_placement(c)
-  if c.type == "utility" or c.type == "desktop" then return end;
-
-  local workarea = c.screen.workarea
-  local geo = c:geometry()
-
-  local max_cascade_x = math.floor((workarea.width - geo.width - cfg.padding) / cfg.cascade_offset_x)
-  local max_cascade_y = math.floor((workarea.height - geo.height - cfg.padding) / cfg.cascade_offset_y)
-  local max_cascade = math.max(1, math.min(max_cascade_x, max_cascade_y))
-
-  cascade_index = cascade_index % max_cascade
-
-  local x = workarea.x + cfg.padding + (cascade_index * cfg.cascade_offset_x)
-  local y = workarea.y + cfg.padding + (cascade_index * cfg.cascade_offset_y)
-
-  c:geometry({ x = x, y = y })
-
-  cascade_index = cascade_index + 1
-end
+awesome.register_xproperty("_FM_PATH", "string")
 
 awful.rules.rules = {
   {
@@ -38,7 +15,14 @@ awful.rules.rules = {
       focus = awful.client.focus.filter,
       raise = true,
       screen = awful.screen.preferred,
-      placement = cascade_placement
+      placement = placement.placement,
+    }
+  },
+  {
+    rule_any = { class = "apps" },
+    properties = {
+      size_hints_honor = false,
+      placement = placement.placement,
     }
   },
   {
@@ -62,29 +46,29 @@ awful.rules.rules = {
       border_width = 0,
       sticky = true,
       floating = true,
-      type = "desktop"
     }
   },
 
   client.connect_signal("manage", function(c)
     if c.name == "system::desktop" then
+      c.floating = true
       c.below = true
       c.x = 0
-      c.y = 0
+      c.y = dpi(-18)
       c.immobilized = true
+      c.type = "desktop"
+      c.size_hints_honor = true
+      return
     end
   end),
 
-  client.connect_signal("property::maximized", function(c)
-    if not c.maximized then
-      c.border_width = 1
+  client.connect_signal("request::geometry", function(c, context, hints)
+    if c.name ~= "system::desktop" and context == "ewmh" then
+      placement.placement(c)
     end
   end)
 }
 
-screen.connect_signal("tag::history::update", function(s)
-  local dominated = #s.clients > 0
-  if not dominated then
-    cascade_index = 0
-  end
+tag.connect_signal("property::selected", function(t)
+  placement.reset_cascade(t.screen)
 end)

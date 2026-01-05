@@ -22,6 +22,7 @@ local cfg = {
     extra_width = dpi(4),
     extra_height = dpi(3),
   },
+  drag_bounds = dpi(4),
 }
 
 local fopts = cairo.FontOptions.create()
@@ -129,6 +130,21 @@ local function get_ol()
   return outline
 end
 
+local function is_titlebar_visible(y)
+  local titlebar_bottom = y + cfg.height
+
+  for s in screen do
+    local wa = s.workarea
+
+    if y >= wa.y
+        and titlebar_bottom <= wa.y + wa.height then
+      return true
+    end
+  end
+
+  return false
+end
+
 local function drag(c)
   local m = mouse.coords()
   local o = cfg.outline
@@ -136,6 +152,10 @@ local function drag(c)
   local g = c:geometry()
   local ox = m.x - g.x
   local oy = m.y - g.y
+
+  local last_valid_x = g.x
+  local last_valid_y = g.y
+  local is_valid = true
 
   local ol = get_ol()
   ol:geometry({
@@ -148,19 +168,34 @@ local function drag(c)
 
   mousegrabber.run(function(ms)
     if ms.buttons[1] then
-      ol:geometry({
-        x = ms.x - ox,
-        y = ms.y - oy,
-      })
+      local new_x = ms.x - ox
+      local new_y = ms.y - oy
+
+      if is_titlebar_visible(new_y) then
+        ol:geometry({
+          x = new_x - o.offset_x,
+          y = new_y,
+        })
+        ol.visible = true
+        last_valid_x = new_x
+        last_valid_y = new_y
+        is_valid = true
+      else
+        ol.visible = false
+        is_valid = false
+      end
       return true
     end
 
-    local fg = ol:geometry()
-    c:geometry({
-      x = fg.x + o.offset_x,
-      y = fg.y,
-    })
     ol.visible = false
+
+    if is_valid then
+      c:geometry({
+        x = last_valid_x,
+        y = last_valid_y,
+      })
+    end
+
     return false
   end, "left_ptr")
 end

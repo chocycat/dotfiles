@@ -1,6 +1,6 @@
 local wallpaper = {}
 
-wallpaper.scale = 2
+wallpaper.scale = dpi(1)
 wallpaper.patterns = {
   checkerboard = {
     { 1, 0 },

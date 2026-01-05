@@ -25,7 +25,8 @@ local function create_outline_widget(parent)
   return widget
 end
 
-function motion.create_outline(x, y, w, h)
+function motion.create_outline(x, y, w, h, prop)
+  prop = prop or "_OUTLINE_ACTIVE"
   local outline = wibox({
     bg = "#00000000",
     type = "utility",
@@ -38,7 +39,7 @@ function motion.create_outline(x, y, w, h)
     ontop = true,
   })
   outline.widget = create_outline_widget(outline)
-  outline.drawin:set_xproperty("_OUTLINE_ACTIVE", "true")
+  outline.drawin:set_xproperty(prop, "true")
   outline.drawin:set_xproperty("_VISIBLE", "false")
 
   return outline
