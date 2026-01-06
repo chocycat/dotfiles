@@ -37,11 +37,11 @@ local function get_batteries()
     end
     enumerator:close()
   end
-
+  
   return batteries
 end
 
-local function get_status_text(name)
+local function get_status(name)
   local base = PATH .. name .. "/"
 
   local status = read_file(base .. "status") or "Unknown"
@@ -105,7 +105,7 @@ local function get_images(bat)
   return images
 end
 
-local function get_status(bat)
+local function get_status_text(bat)
   local status = bat.status
   if status == "Discharging" then
     return "Discharging"
